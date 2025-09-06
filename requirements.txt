@@ -1,2 +1,5 @@
 streamlit
-openai
+google-generativeai
+gTTS
+pillow
+pandas
