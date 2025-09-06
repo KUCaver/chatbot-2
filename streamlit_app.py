@@ -1,45 +1,30 @@
 # streamlit_app.py
 # -------------------------------------------------------------
-# 설치: pip install -U streamlit google-generativeai gTTS pillow pandas
+# 설치: pip install streamlit google-generativeai gTTS pillow pandas
 # 실행: streamlit run streamlit_app.py
-#  - LLM 키 없으면 규칙기반 폴백
-#  - 키 넣으면 Gemini로 요약/분류/자유대화 강화
+#  - 키 없거나 오류 시: 데모 규칙(요약/분류=규칙, 카드추천=로컬룰)으로 시연
+#  - 키 정상일 때: Gemini로 요약/분류/자유대화/프롬프트 생성 활성화
+#  - 주의: 공개 리포에 실제 키 하드코딩은 금물(여기선 PoC 편의상 기본값 제공)
 # -------------------------------------------------------------
-import os, io, json, time, base64, math, random, re
+
+import os, io, json, time, base64, math, random
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 from PIL import Image, ImageDraw
 from gtts import gTTS
 
-# ============ 공통 설정 ============
-st.set_page_config(page_title="아바타 금융 코치 PoC (단일 챗 UI)", page_icon="💬", layout="centered")
-st.caption("※ PoC 고지: 결제/지오펜싱/CRM 연동은 모의 시연입니다.")
+# 0) 페이지 설정 (항상 최상단)
+st.set_page_config(page_title="아바타 금융 코치 PoC", page_icon="💬", layout="centered")
 
-# 사이드바: 키 입력 (Secrets → Env → Sidebar)
-with st.sidebar:
-    st.header("설정")
-    key_from_sidebar = st.text_input("Gemini API Key (GOOGLE_API_KEY)", type="password")
-    API_KEY = (st.secrets.get("GOOGLE_API_KEY", "")
-               or os.getenv("GOOGLE_API_KEY", "")
-               or key_from_sidebar)
-    st.markdown("---")
-    st.caption("키가 없으면 규칙기반 데모 모드로 작동합니다.")
+# === 안전 고지(간단) ===
+st.caption("※ 데모 고지: 실제 결제/지오펜싱/CRM 연동은 PoC에서 모의로 시연합니다.")
 
-# LLM 초기화
-USE_LLM, MODEL = False, None
-if API_KEY:
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=API_KEY)
-        MODEL = genai.GenerativeModel("gemini-1.5-flash-latest")
-        USE_LLM = True
-    except Exception as e:
-        st.error(f"Gemini 초기화 실패: {e}")
-else:
-    st.info("LLM 키 미설정: 규칙기반 모드로 동작합니다.")
+# 1) API 키 (환경변수 → 기본값 → 사이드바 입력)
+DEFAULT_API_KEY = "AIzaSyDvTKaKoZs9_UjG0aY8bd4pjmJaGKJKB6g"  # ⚠️ PoC 편의용. 공개 저장소엔 두지 마세요.
+API_KEY = os.getenv("GOOGLE_API_KEY", "") or DEFAULT_API_KEY
 
-# ============ 유틸 ============
+# 2) 유틸 & 공통 데이터 ---------------------------------------------------------
 def draw_avatar(size: int = 320):
     img = Image.new("RGBA", (size, size), (245, 248, 255, 255))
     d = ImageDraw.Draw(img)
@@ -58,18 +43,14 @@ def tts_to_mp3_bytes(text: str):
         return None
 
 def safe_json_loads(s: str, default):
-    try:
-        return json.loads(s)
-    except Exception:
-        return default
+    try: return json.loads(s)
+    except Exception: return default
 
-def money(x):
-    try:
-        return f"{int(x):,}원"
-    except:
-        return str(x)
+def money(x): 
+    try: return f"{int(x):,}원"
+    except: return str(x)
 
-# 샘플 룰/데이터
+# 결제 룰 샘플 (간단화)
 SAMPLE_RULES = [
     {"name":"Alpha Card","mcc":["FNB","CAFE"],"rate":0.05,"cap":20000},
     {"name":"Beta Card","mcc":["ALL"],"rate":0.02,"cap":50000},
@@ -77,13 +58,14 @@ SAMPLE_RULES = [
 ]
 DEPT_MAP = {"민원":"고객보호센터","카드":"카드상담센터","대출":"여신상담센터",
             "연금":"연금·세제상담","세제":"연금·세제상담","상담요청":"종합상담","기타":"종합상담"}
+
 SAMPLE_TX = pd.DataFrame([
     {"date":"2025-08-28","merchant":"스타커피 본점","mcc":"CAFE","amount":4800},
     {"date":"2025-08-29","merchant":"김밥왕","mcc":"FNB","amount":8200},
     {"date":"2025-08-30","merchant":"메가시네마","mcc":"CINE","amount":12000},
 ])
 
-# ============ 아바타(폰 프레임) ============
+# 3) 아바타(폰 프레임) 렌더 ------------------------------------------------------
 def render_phone_avatar(overlay_text: str = "무엇을 도와드릴까요?",
                         media_bytes: bytes | None = None,
                         is_video: bool = False):
@@ -107,12 +89,12 @@ def render_phone_avatar(overlay_text: str = "무엇을 도와드릴까요?",
                       if is_video else f'<img src="data:image/png;base64,{b64}" />')
     else:
         try:
-            with open("assets/avatar.mp4","rb") as f:
+            with open("assets/avatar.mp4","rb") as f: 
                 b64 = base64.b64encode(f.read()).decode()
             html_media = f'<video autoplay muted loop playsinline src="data:video/mp4;base64,{b64}"></video>'
         except:
             try:
-                with open("assets/avatar.png","rb") as f:
+                with open("assets/avatar.png","rb") as f: 
                     b64 = base64.b64encode(f.read()).decode()
                 html_media = f'<img src="data:image/png;base64,{b64}" />'
             except:
@@ -125,7 +107,17 @@ def render_phone_avatar(overlay_text: str = "무엇을 도와드릴까요?",
     </div>"""
     components.html(html, height=760)
 
-# ============ 기능 로직 ============
+# 4) LLM 초기화 -------------------------------------------------------------------
+USE_LLM, MODEL = False, None
+if API_KEY:
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=API_KEY)
+        MODEL = genai.GenerativeModel("gemini-1.5-flash-latest")
+        USE_LLM = True
+    except Exception:
+        USE_LLM = False
+
 def llm_summary(text: str) -> str:
     if USE_LLM and MODEL:
         try:
@@ -164,14 +156,15 @@ def build_handoff(summary: str, cls: dict) -> dict:
         "priority": 2 if cls.get("urgency")=="높음" else 1,
         "context_summary": summary,
         "recommendation_basis": f"{cls.get('intent')}/{cls.get('sub_intent')}",
-        "version": "poc-0.3",
+        "version": "poc-0.2",
         "ts": int(time.time())
     }
 
+# 5) 추천 로직(결제) --------------------------------------------------------------
 def estimate_saving(amount: int, mcc: str, rules: list, month_usage: dict):
     best = ("현재카드 유지", 0, "추가 혜택 없음")
     for r in rules:
-        if "ALL" not in r.get("mcc", []) and mcc not in r.get("mcc", []):
+        if "ALL" not in r.get("mcc", []) and mcc not in r.get("mcc", []): 
             continue
         rate = float(r.get("rate", 0.0))
         cap  = int(r.get("cap", 99999999))
@@ -182,186 +175,182 @@ def estimate_saving(amount: int, mcc: str, rules: list, month_usage: dict):
             best = (r["name"], save, f"{r['name']} {int(rate*100)}% / 잔여한도 {remain:,}원")
     return best
 
+# 6) 목표 기반 포트폴리오(간이 알고리즘) ------------------------------------------
 def plan_goal(goal_name:str, target_amt:int, months:int, risk:str, seed:int=0):
-    risk = (risk or "").lower()
+    """단순 예시: 위험성향에 따라 파킹/적금/ETF 비율 추천 및 월 납입 계산."""
+    risk = risk.lower()
     if risk in ["낮음","low"]:     mix = {"파킹형":0.7,"적금":0.3,"ETF":0.0}
     elif risk in ["보통","mid"]:   mix = {"파킹형":0.4,"적금":0.4,"ETF":0.2}
     else:                          mix = {"파킹형":0.2,"적금":0.4,"ETF":0.4}
     monthly = math.ceil(target_amt / max(months,1) / 1000)*1000
+    # 아주 간단한 기대수익(연) 가정 → 월 환산 (과장 금지)
     assumed = {"파킹형":0.022,"적금":0.035,"ETF":0.07}
+    # 진행률/보상 포인트 샘플
     random.seed(seed or months)
-    progress = random.randint(5,40)
+    progress = random.randint(5,40)  # 시작 진행률
     return {
         "goal":goal_name,"target":target_amt,"months":months,"monthly":monthly,
         "mix":mix,"assumed_yields":assumed,"progress":progress
     }
 
-# ============ 인텐트 라우팅 (자연어) ============
-INTENT_HELP = """
-**가능한 요청 (예시)**  
-- 요약/분류/핸드오프: “정기예금 금리 불일치 정리해서 핸드오프 만들어줘”
-- 결제 최적화: “스타커피 12800원 결제 예정 추천 카드 적용해줘”
-  · 파라미터 직입력도 가능: `결제 merchant=스타커피 amount=12800 mcc=CAFE`
-- 목표 플랜: “여행 자금 200만원 8개월 보통 위험으로 목표 플랜”
-- 일반 대화: 그냥 물어보면 돼요.
-"""
+# 7) 사이드바(키 입력, 아바타 썸네일)
+with st.sidebar:
+    st.image(draw_avatar(), caption="금융 코치")
+    st.markdown(f"**LLM 모드:** {'✅ (키 사용)' if USE_LLM else '❌ (데모 규칙)'}")
 
-def parse_struct_kv(text: str) -> dict:
-    """merchant=스타커피 amount=12000 mcc=CAFE 같은 KV 추출"""
-    kv = {}
-    for m in re.finditer(r'(\w+)\s*=\s*([^\s]+)', text):
-        k, v = m.group(1).lower(), m.group(2)
-        kv[k] = v
-    return kv
-
-def detect_intent(message: str) -> str:
-    t = message.strip().lower()
-    if t.startswith("/help") or "도움말" in t:
-        return "help"
-    if any(k in t for k in ["결제", "pay", "카드 추천", "추천 카드"]):
-        return "pay"
-    if any(k in t for k in ["목표", "포트폴리오", "플랜"]):
-        return "goal"
-    if any(k in t for k in ["요약", "핸드오프", "분류"]):
-        return "handoff"
-    return "chat"
-
-# ============ UI(단일 챗) ============
-st.title("아바타형 금융 코치 – 단일 대화형 UI")
-st.caption("자유롭게 입력하면 필요한 기능(요약/핸드오프, 결제 최적화, 목표 플랜)이 자동 수행됩니다.")
-
-# 아바타 미디어(선택)
-media = st.file_uploader("아바타 미디어 업로드(선택, PNG/JPG/MP4)", type=["png","jpg","jpeg","mp4"])
-if "avatar_media" not in st.session_state:
-    st.session_state.avatar_media = None
-if media:
-    st.session_state.avatar_media = (media.read(), media.type=="video/mp4")
-render_phone_avatar("어서 오세요. 어떤 금융 고민을 도와드릴까요?",
-                    *(st.session_state.avatar_media or (None, False)))
-
-# 세션 상태
-if "chat_hist" not in st.session_state:
-    st.session_state.chat_hist = []
-
-# 과거 메시지 출력
-for role, text in st.session_state.chat_hist:
-    with st.chat_message("user" if role=="user" else "assistant"):
-        st.markdown(text)
-
-# 입력
-msg = st.chat_input("메시지를 입력하세요. (/help: 사용법)")
-if msg:
-    st.session_state.chat_hist.append(("user", msg))
-    intent = detect_intent(msg)
-
-    if intent == "help":
-        reply = INTENT_HELP
-
-    elif intent == "handoff":
-        # 요약/분류/핸드오프
-        summary = llm_summary(msg)
-        cls = llm_classify(msg)
-        handoff = build_handoff(summary, cls)
-        reply = (
-            f"**요약**\n{summary}\n\n"
-            f"**의도 분류**\n```json\n{json.dumps(cls, ensure_ascii=False, indent=2)}\n```\n"
-            f"**상담사 핸드오프**\n```json\n{json.dumps(handoff, ensure_ascii=False, indent=2)}\n```"
-        )
-        # 아바타 말풍선 갱신
-        render_phone_avatar(f"요약 완료: {summary}",
-                            *(st.session_state.avatar_media or (None, False)))
-
-    elif intent == "pay":
-        # 결제 최적화
-        kv = parse_struct_kv(msg)
-        # 자연어 추정
-        amount = int(re.search(r'(\d{3,})\s*원?', msg).group(1)) if re.search(r'(\d{3,})\s*원?', msg) else int(kv.get("amount", "12000"))
-        merchant = kv.get("merchant") or ( "스타커피" if "커피" in msg else "메가시네마" if "시네마" in msg or "영화" in msg else "김밥왕")
-        mcc = kv.get("mcc") or ( "CAFE" if "커피" in msg else "CINE" if "영화" in msg else "FNB")
-        # 룰/누적 사용량 입력이 있으면 JSON 파싱
-        rules = safe_json_loads(kv.get("rules",""), SAMPLE_RULES)
-        usage = safe_json_loads(kv.get("usage",""), {"Alpha Card": 5000})
-
-        name, save, reason = estimate_saving(amount, mcc, rules, usage)
-        payload = {
-            "merchant": merchant, "mcc": mcc, "amount": amount,
-            "recommended_card": name, "expected_saving": save, "reason": reason,
-            "ts": int(time.time())
-        }
-        reply = (
-            f"**결제 직전 최적화(모의)**\n"
-            f"- 가맹점: {merchant} / MCC: {mcc}\n"
-            f"- 금액: {money(amount)}\n"
-            f"- 추천 카드: **{name}**\n"
-            f"- 예상 절약: **{money(save)}**\n"
-            f"- 사유: {reason}\n\n"
-            f"**적용 페이로드(모의)**\n```json\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n```"
-        )
-        # 아바타 말풍선
-        render_phone_avatar(f"{merchant} {money(amount)}—추천 {name} (절약 {money(save)})",
-                            *(st.session_state.avatar_media or (None, False)))
-
-    elif intent == "goal":
-        # 목표 플랜
-        # 자연어에서 금액/개월/위험 추출
-        amt_match = re.search(r'(\d[\d,]{2,})\s*원', msg)
-        months_match = re.search(r'(\d{1,2})\s*개월', msg)
-        risk = "보통"
-        if "낮음" in msg: risk = "낮음"
-        elif "높음" in msg: risk = "높음"
-        target_amt = int(amt_match.group(1).replace(",","")) if amt_match else 2_000_000
-        months = int(months_match.group(1)) if months_match else 8
-        # 목표명
-        goal_name = "여행 자금"
-        for key in ["여행", "장비", "학비", "이사", "자동차", "결혼", "기타"]:
-            if key in msg:
-                goal_name = f"{key} 자금"; break
-
-        plan = plan_goal(goal_name, target_amt, months, risk)
-        # 표(간단 스케줄)
-        rows = [{"월":i+1, "권장 납입": plan["monthly"], "누적": plan["monthly"]*(i+1)} for i in range(plan["months"])]
-        df = pd.DataFrame(rows)
-
-        reply = (
-            f"**목표 플랜 생성**\n"
-            f"- 목표: {plan['goal']} / 기간: {plan['months']}개월\n"
-            f"- 목표 금액: {money(plan['target'])}\n"
-            f"- 권장 월 납입: **{money(plan['monthly'])}**\n"
-            f"- 권장 배분: {json.dumps(plan['mix'], ensure_ascii=False)}\n"
-            f"- 가정 수익(연): {json.dumps(plan['assumed_yields'], ensure_ascii=False)}\n"
-            f"- 진행률(시작치): {plan['progress']}%\n"
-        )
-        # 아바타 말풍선
-        render_phone_avatar(f"'{plan['goal']}' 월 {money(plan['monthly'])}로 {months}개월!",
-                            *(st.session_state.avatar_media or (None, False)))
-        # 데이터프레임도 함께 보여주기
-        with st.chat_message("assistant"):
-            st.markdown(reply)
-            st.dataframe(df, use_container_width=True)
-        st.session_state.chat_hist.append(("assistant", reply))
-        st.stop()
-
+# 8) 상단 아바타 + 사용자 미디어 업로드
+st.title("아바타형 금융 코치 – PoC")
+colA, colB = st.columns([1,1], vertical_alignment="top")
+with colA:
+    st.caption("아바타 미디어 업로드(선택) – 세션 동안 유지")
+    media = st.file_uploader("이미지 PNG/JPG 또는 MP4 영상", type=["png","jpg","jpeg","mp4"])
+with colB:
+    if media:
+        render_phone_avatar("어서 오세요. 어떤 금융 고민을 도와드릴까요?",
+                            media_bytes=media.read(), is_video=media.type=="video/mp4")
     else:
-        # 일반 대화 (LLM 있으면 LLM, 없으면 간단 응답)
-        if USE_LLM and MODEL:
+        render_phone_avatar("어서 오세요. 어떤 금융 고민을 도와드릴까요?")
+
+# 9) 탭들 -------------------------------------------------------------------------
+tab1, tab2, tabX, tab3 = st.tabs([
+    "① 요약·분류·핸드오프", 
+    "② 결제 직전 실시간 최적화(모의 PAY)",
+    "③ 목표 기반 포트폴리오",
+    "④ 자유 대화(옵션)"
+])
+
+# --- 탭1: 요약·분류·핸드오프
+with tab1:
+    user_text = st.text_area(
+        "고객의 고민/문의 입력",
+        value="지난달 15일 100만원 정기예금 3.5%로 들었는데 앱에는 3.2%로 보입니다. 확인 부탁드려요.",
+        height=140
+    )
+    if st.button("요약 & 분류 & 핸드오프 생성", type="primary"):
+        summary = llm_summary(user_text)
+        cls = llm_classify(user_text)
+        handoff = build_handoff(summary, cls)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("요약"); st.write(summary)
+            st.subheader("의도 분류"); st.json(cls, expanded=False)
+        with c2:
+            st.subheader("상담사 핸드오프 페이로드"); st.json(handoff, expanded=False)
+            coach = "말씀 감사합니다. 요약·분류 결과를 상담사에게 정확히 전달하겠습니다. 콜백도 예약 가능해요."
+            if st.toggle("감정 코칭 멘트 음성 듣기", value=False):
+                audio_bytes = tts_to_mp3_bytes(coach)
+                if audio_bytes: st.audio(audio_bytes, format="audio/mp3")
+
+        # 아바타 말풍선 갱신
+        try:
+            if media:
+                render_phone_avatar(f"요약: {summary}", media_bytes=media.getvalue(),
+                                    is_video=media.type=="video/mp4")
+            else:
+                render_phone_avatar(f"요약: {summary}")
+        except Exception:
+            pass
+
+# --- 탭2: 결제 직전 실시간 최적화 (PAY 모의)
+with tab2:
+    st.caption("다른 금융사의 PAY 앱처럼 **결제 직전** 화면을 모의하여 즉시 추천·적용 흐름을 시연합니다.")
+    cL, cR = st.columns([1,1])
+    with cL:
+        merchant = st.selectbox("가맹점", ["스타커피", "버거팰리스", "메가시네마", "김밥왕"])
+        mcc = {"스타커피":"CAFE","버거팰리스":"FNB","김밥왕":"FNB","메가시네마":"CINE"}[merchant]
+        amount = st.number_input("결제 금액(원)", min_value=1000, value=12800, step=500)
+        rules_text = st.text_area("내 카드 혜택 룰(JSON)", 
+            value=json.dumps(SAMPLE_RULES, ensure_ascii=False, indent=2), height=140)
+        usage_text = st.text_input("이번달 카드별 누적 적립(JSON)", value='{"Alpha Card": 5000}')
+        if "pay_state" not in st.session_state:
+            st.session_state.pay_state = {"applied": False, "card": None, "save": 0}
+        if st.button("실시간 추천 보기"):
+            rules = safe_json_loads(rules_text, SAMPLE_RULES)
+            usage = safe_json_loads(usage_text, {})
+            name, save, reason = estimate_saving(int(amount), mcc, rules, usage)
+            st.session_state.pay_state.update({"applied": False, "card": name, "save": save, "reason":reason})
+            if media:
+                render_phone_avatar(f"{merchant} {money(amount)} 결제 예정—추천: {name} (절약 {money(save)})",
+                                    media_bytes=media.getvalue(), is_video=media.type=="video/mp4")
+            else:
+                render_phone_avatar(f"{merchant} {money(amount)}—추천 {name} (절약 {money(save)})")
+        if st.button("추천 카드 적용(모의)"):
+            st.session_state.pay_state["applied"] = True
+            msg = f"✅ {st.session_state.pay_state['card']} 적용됨! 이번 결제 절약 {money(st.session_state.pay_state['save'])}"
+            st.success(msg)
+            # 버블 갱신
+            if media:
+                render_phone_avatar(msg, media_bytes=media.getvalue(), is_video=media.type=="video/mp4")
+            else:
+                render_phone_avatar(msg)
+    with cR:
+        st.subheader("PAY 미니 화면(모의)")
+        ps = st.session_state.pay_state
+        st.write("• 추천 카드:", ps.get("card") or "—")
+        st.write("• 예상 절약:", money(ps.get("save",0)))
+        st.write("• 사유:", ps.get("reason") or "—")
+        st.info("※ 실서비스에선 카드 보유/혜택/잔여한도·가맹점 MCC·쿠폰/행사 등을 합산하여 라우팅합니다. (PoC는 로컬 룰)")
+
+    st.divider()
+    st.caption("거래 로그(샘플/업로드 가능)")
+    up = st.file_uploader("CSV 업로드", type=["csv"], key="csv_pay")
+    tx = pd.read_csv(up) if up else SAMPLE_TX.copy()
+    st.dataframe(tx, use_container_width=True)
+
+# --- 탭3: 목표 기반 포트폴리오
+with tabX:
+    st.caption("목표를 만들면 월 납입·추천 배분(파킹/적금/ETF 예시)·진행률을 보여줍니다.")
+    gcol1, gcol2 = st.columns([1,1])
+    with gcol1:
+        goal = st.text_input("목표 이름", value="여행 자금")
+        target = st.number_input("목표 금액(원)", min_value=100000, value=2000000, step=100000)
+        months = st.number_input("기간(개월)", min_value=1, value=8, step=1)
+        risk = st.selectbox("위험 성향", ["낮음","보통","높음"], index=1)
+        if st.button("목표 플랜 생성"):
+            plan = plan_goal(goal, int(target), int(months), risk)
+            st.session_state.goal_plan = plan
+            # 아바타 말풍선
+            msg = f"'{goal}' 달성 플랜 생성! 월 {money(plan['monthly'])}로 {months}개월."
+            render_phone_avatar(msg, media_bytes=(media.getvalue() if media else None),
+                                is_video=(media and media.type=="video/mp4"))
+    with gcol2:
+        plan = st.session_state.get("goal_plan")
+        if plan:
+            st.subheader(f"목표: {plan['goal']}")
+            st.write(f"목표 금액: {money(plan['target'])} / 기간: {plan['months']}개월")
+            st.progress(min(plan["progress"],100)/100)
+            st.write(f"권장 월 납입: **{money(plan['monthly'])}**")
+            st.write("권장 배분:")
+            st.json(plan["mix"])
+            st.write("가정 수익(연):", plan["assumed_yields"])
+            # 간단한 월별 스케줄 표
+            rows = [{"월":i+1, "권장 납입": plan["monthly"], "누적": plan["monthly"]*(i+1)} for i in range(plan["months"])]
+            st.dataframe(pd.DataFrame(rows))
+
+# --- 탭4: 자유 대화
+with tab3:
+    st.caption("Gemini 키가 설정된 경우에만 활성화됩니다.")
+    if "chat_hist" not in st.session_state:
+        st.session_state.chat_hist = []
+    for role, text in st.session_state.chat_hist:
+        with st.chat_message("user" if role=="user" else "assistant"):
+            st.markdown(text)
+    if not USE_LLM:
+        st.info("LLM 키가 없어 자유 대화는 비활성화")
+    else:
+        if msg := st.chat_input("메시지를 입력하세요"):
+            # 간단한 히스토리 기반 대화
+            history = "\n".join([("User: "+t if r=="user" else "Assistant: "+t) 
+                                 for r,t in st.session_state.chat_hist]) + f"\nUser: {msg}\nAssistant:"
             try:
-                history = "\n".join([("User: "+t if r=="user" else "Assistant: "+t) 
-                                     for r,t in st.session_state.chat_hist if r in ("user","assistant")])
-                prompt = f"{history}\nUser: {msg}\nAssistant:"
-                res = MODEL.generate_content(prompt)
+                res = MODEL.generate_content(history)
                 reply = getattr(res, "text", str(res)).strip()
             except Exception as e:
                 reply = f"[대화 오류: {e}]"
-        else:
-            # 폴백: 간단 규칙
-            reply = "말씀 감사합니다. 자세한 기능은 '/help'를 참고해 주세요."
-        render_phone_avatar(reply[:40] + ("..." if len(reply) > 40 else ""),
-                            *(st.session_state.avatar_media or (None, False)))
-
-    with st.chat_message("assistant"):
-        st.markdown(reply)
-    st.session_state.chat_hist.append(("assistant", reply))
-    st.rerun()
+            st.session_state.chat_hist += [("user", msg), ("assistant", reply)]
+            st.rerun()
 
 st.markdown("---")
-st.caption("본 PoC는 단일 대화형 UI에서 요약·핸드오프 / 결제 최적화 / 목표 플랜을 자연어로 트리거합니다.")
+st.caption("본 PoC는 문서의 핵심 시나리오(아바타·상담사 핸드오프·결제 직전 최적화·목표 기반 관리)를 요약 구현합니다. :contentReference[oaicite:1]{index=1}")
+
